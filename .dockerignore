@@ -9,12 +9,20 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# Environment variables
+# Environment variables & secrets (CRITICAL: Do not copy into Docker build context)
+.env
+.env.*
+!.env.example
+server/.env
+server/.env.*
+!server/.env.example
+**/.env
+**/.env.*
+!**/.env.example
 
-
-
-# MacOS files
+# MacOS / OS files
 .DS_Store
+Thumbs.db
 
 # Docker files
 Dockerfile
@@ -27,4 +35,5 @@ docker-compose.yml
 # IDE files
 .vscode
 .idea
+.cursor
 *.sublime-workspace
