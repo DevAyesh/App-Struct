@@ -5,6 +5,16 @@ module.exports = {
   ],
   theme: {
     extend: {
+      /* ---------- Design tokens ---------- */
+      // Spacing: Tailwind's default 4px scale is kept as-is — even steps (2, 4, 6, 8...)
+      // give the 8px rhythm without overriding every padding in the app.
+      borderRadius: {
+        // Radius tokens
+        'card': '16px',
+        'panel': '20px',
+        'hero': '24px',
+        'pill': '9999px',
+      },
       colors: {
         primary: {
           50: '#f8fafc',
@@ -94,9 +104,20 @@ module.exports = {
       },
       boxShadow: {
         'soft': '0 2px 15px -3px rgba(0, 0, 0, 0.07), 0 10px 20px -2px rgba(0, 0, 0, 0.04)',
+        'card': '0 4px 24px -4px rgba(15, 23, 42, 0.08), 0 12px 32px -8px rgba(15, 23, 42, 0.06)',
+        'card-hover': '0 8px 32px -4px rgba(15, 23, 42, 0.12), 0 16px 40px -8px rgba(15, 23, 42, 0.10)',
+        'input': '0 2px 8px rgba(15, 23, 42, 0.04)',
         '3xl': '0 25px 50px -12px rgba(0, 0, 0, 0.25)',
         'glow': '0 0 20px rgba(99, 102, 241, 0.5)',
         'glow-lg': '0 0 30px rgba(99, 102, 241, 0.7)',
+      },
+      transitionDuration: {
+        'fast': '150ms',
+        'base': '200ms',
+      },
+      transitionTimingFunction: {
+        'brand': 'cubic-bezier(0.4, 0, 0.2, 1)',
+        'out': 'cubic-bezier(0.16, 1, 0.3, 1)',
       },
       backdropBlur: {
         xs: '2px',
