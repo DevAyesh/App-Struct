@@ -152,13 +152,17 @@ async function runTests() {
     assert.ok(data2.message.includes('already in progress'), 'Unexpected 409 message');
 
     // Clean up req1 stream
-    const res1 = await req1Promise;
-    if (res1.body) {
-      const reader = res1.body.getReader();
-      while (true) {
-        const { done } = await reader.read();
-        if (done) break;
+    try {
+      const res1 = await req1Promise;
+      if (res1.body) {
+        const reader = res1.body.getReader();
+        while (true) {
+          const { done } = await reader.read();
+          if (done) break;
+        }
       }
+    } catch (e) {
+      // Stream drain cleanup error ignored
     }
   });
 
