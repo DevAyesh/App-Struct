@@ -9,22 +9,49 @@ on:
 
 jobs:
   build-and-test:
+    name: Build and Test
     runs-on: ubuntu-latest
 
+    services:
+      mongodb:
+        image: mongo:6.0
+        ports:
+          - 27017:27017
+
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Node
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install
+      - name: Install Frontend Dependencies
         run: npm install
 
-      - name: Build
-        run: npm run build
+      - name: Install Backend Dependencies
+        working-directory: ./server
+        run: npm install
 
-      - name: Security Tests
+      - name: Build Frontend Application
+        run: npm run build
+        env:
+          CI: false
+
+      - name: Start Backend Server
+        working-directory: ./server
+        run: |
+          node server.js &
+          sleep 3
+        env:
+          PORT: 5000
+          MONGODB_URI: mongodb://127.0.0.1:27017/appstruct
+          JWT_SECRET: ci_test_jwt_secret_key_12345678901234567890
+          CORS_ORIGIN: http://localhost:3000
+
+      - name: Run Security & Remediation Verification Suite
         run: node tests/remediation_verification.js
+        env:
+          MONGODB_URI: mongodb://127.0.0.1:27017/appstruct
+          JWT_SECRET: ci_test_jwt_secret_key_12345678901234567890

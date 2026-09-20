@@ -46,9 +46,17 @@ async function runTests() {
 
   await test('Phase 1.2: Client .env does not expose server secrets', () => {
     const clientEnvPath = path.resolve(__dirname, '../.env');
-    const content = fs.readFileSync(clientEnvPath, 'utf8');
-    assert.strictEqual(content.includes('REACT_APP_MONGODB_URI'), false, 'REACT_APP_MONGODB_URI found in client .env');
-    assert.strictEqual(content.includes('JWT_SECRET'), false, 'JWT_SECRET found in client .env');
+    if (fs.existsSync(clientEnvPath)) {
+      const content = fs.readFileSync(clientEnvPath, 'utf8');
+      assert.strictEqual(content.includes('REACT_APP_MONGODB_URI'), false, 'REACT_APP_MONGODB_URI found in client .env');
+      assert.strictEqual(content.includes('JWT_SECRET'), false, 'JWT_SECRET found in client .env');
+    }
+    const clientEnvExamplePath = path.resolve(__dirname, '../.env.example');
+    if (fs.existsSync(clientEnvExamplePath)) {
+      const content = fs.readFileSync(clientEnvExamplePath, 'utf8');
+      assert.strictEqual(content.includes('REACT_APP_MONGODB_URI'), false, 'REACT_APP_MONGODB_URI found in client .env.example');
+      assert.strictEqual(content.includes('JWT_SECRET'), false, 'JWT_SECRET found in client .env.example');
+    }
   });
 
   // =================================================================
@@ -58,8 +66,11 @@ async function runTests() {
   const mongoose = require('../server/node_modules/mongoose');
   require('../server/node_modules/dotenv').config({ path: path.resolve(__dirname, '../server/.env') });
 
+  const mongoUri = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/appstruct';
+  process.env.JWT_SECRET = process.env.JWT_SECRET || 'test_jwt_secret_key_12345678901234567890';
+
   if (mongoose.connection.readyState === 0) {
-    await mongoose.connect(process.env.MONGODB_URI, { dbName: 'appstruct' });
+    await mongoose.connect(mongoUri, { dbName: 'appstruct' });
   }
 
   const User = require('../server/models/User');
