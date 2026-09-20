@@ -1,221 +1,222 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { 
-  HiLightningBolt, 
-  HiDesktopComputer, 
-  HiDeviceMobile, 
-  HiCube,
-  HiDocumentText,
-  HiDownload,
-  HiFolder,
-  HiX,
-  HiCheckCircle,
-  HiExclamationCircle,
-  HiClipboardCopy,
-  HiEye,
-  HiEyeOff
+  HiDownload, 
+  HiClipboardCopy, 
+  HiArrowLeft, 
+  HiPlus, 
+  HiExclamationCircle, 
+  HiCheckCircle, 
+  HiX, 
+  HiSparkles,
+  HiRefresh
 } from 'react-icons/hi';
 import API_URL from './config/api';
-import { GoogleLogin } from '@react-oauth/google';
+import DashboardLayout from './components/DashboardLayout';
+import IdeaInput from './components/IdeaInput';
+import ContextPanel from './components/ContextPanel';
+import SavedBlueprintsList from './components/SavedBlueprintsList';
+import GenerationStepper from './components/GenerationStepper';
+import AuthModal from './components/AuthModal';
 
-function App() {
+export default function App() {
+  // Core Configuration State
   const [appIdea, setAppIdea] = useState('');
-  const [platform, setPlatform] = useState('web');
-  const [detailLevel, setDetailLevel] = useState('full'); // 'brief' or 'full'
+  const [platform, setPlatform] = useState('web'); // 'web' | 'mobile' | 'both'
+  const [detailLevel, setDetailLevel] = useState('full'); // 'brief' | 'full'
   const [blueprint, setBlueprint] = useState('');
-  const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
+  const [activeBlueprintId, setActiveBlueprintId] = useState(null);
+  const [currentView, setCurrentView] = useState('home'); // 'home' | 'blueprint'
+  const [generatingBlueprint, setGeneratingBlueprint] = useState(null);
+
+  // Authentication State
   const [user, setUser] = useState(null);
-  const [savedBlueprints, setSavedBlueprints] = useState([]);
+  const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
+  const [isAuthMode, setIsAuthMode] = useState('login'); // 'login' | 'register' | 'forgot' | 'reset'
   const [loginForm, setLoginForm] = useState({ email: '', password: '', confirmPassword: '' });
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [error, setError] = useState(null);
-  const [, setAuthToken] = useState(null);
-  const [toast, setToast] = useState(null);
-  const [isAuthMode, setIsAuthMode] = useState('login'); // 'login' or 'register'
-  const [resetToken, setResetToken] = useState(null);
-  const [authSuccess, setAuthSuccess] = useState(null);
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(false); // Sidebar state
+  const [authSuccess, setAuthSuccess] = useState(null);
+  const [resetToken, setResetToken] = useState(null);
 
-  // Toast notification helper
-  const showToast = (message, type = 'success') => {
+  // Blueprints & Favorites Management
+  const [savedBlueprints, setSavedBlueprints] = useState([]);
+  const [favorites, setFavorites] = useState(() => {
+    try {
+      const stored = localStorage.getItem('appstruct_favorites');
+      return new Set(stored ? JSON.parse(stored) : []);
+    } catch {
+      return new Set();
+    }
+  });
+
+  // UI & Network State
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [error, setError] = useState(null);
+  const [lastSubmittedPrompt, setLastSubmittedPrompt] = useState('');
+  const [toast, setToast] = useState(null);
+  const [chipFocusSignal, setChipFocusSignal] = useState(0);
+
+  // Merged blueprints list with active generating blueprint at the top
+  const displayedBlueprints = useMemo(() => {
+    if (!generatingBlueprint) return savedBlueprints;
+    return [generatingBlueprint, ...savedBlueprints.filter((b) => b._id !== generatingBlueprint._id)];
+  }, [generatingBlueprint, savedBlueprints]);
+
+  // Current active blueprint title
+  const activeTitle = useMemo(() => {
+    if (generatingBlueprint && activeBlueprintId === generatingBlueprint._id) {
+      return generatingBlueprint.title;
+    }
+    const found = savedBlueprints.find((b) => b._id === activeBlueprintId);
+    return found ? found.title || found.ideaInput : (appIdea ? appIdea.slice(0, 60) : 'Technical Blueprint');
+  }, [generatingBlueprint, activeBlueprintId, savedBlueprints, appIdea]);
+
+  // Toast Helper
+  const showToast = useCallback((message, type = 'success') => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 3000);
+  }, []);
+
+  const getAccessToken = () => localStorage.getItem('authToken');
+
+  const persistSession = (token, nextUser) => {
+    if (token) localStorage.setItem('authToken', token);
+    setUser(nextUser);
   };
 
-  // Handle verification/reset tokens and restore session via cookie
+  // Restore session + check URL auth tokens on mount
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const verifyToken = params.get('verifyToken');
-    const resetTokenFromUrl = params.get('resetToken');
-  
-    if (verifyToken) {
-      verifyEmail(verifyToken);
-    }
-  
-    if (resetTokenFromUrl) {
-      setResetToken(resetTokenFromUrl);
-      setIsAuthMode('reset');
-      setIsLoginModalOpen(true);
-    }
-  
-    fetchUserProfile();
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    const incomingResetToken = params.get('resetToken');
 
-  const fetchUserProfile = async () => {
-    try {
-      const response = await fetch(`${API_URL}/api/auth/me`, {
-        credentials: 'include'
-      });
+    const clearAuthParams = () => {
+      window.history.replaceState({}, document.title, window.location.pathname);
+    };
 
-      if (response.ok) {
+    const initAuth = async () => {
+      if (verifyToken) {
+        try {
+          const response = await fetch(`${API_URL}/api/auth/verify-email`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: verifyToken })
+          });
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.message || 'Email verification failed');
+          setAuthSuccess(data.message || 'Email verified. You can now sign in.');
+          setIsAuthMode('login');
+          setIsLoginModalOpen(true);
+        } catch (verifyError) {
+          setError(verifyError.message);
+          setIsLoginModalOpen(true);
+        } finally {
+          clearAuthParams();
+        }
+      }
+
+      if (incomingResetToken) {
+        setResetToken(incomingResetToken);
+        setIsAuthMode('reset');
+        setIsLoginModalOpen(true);
+        clearAuthParams();
+      }
+
+      const token = localStorage.getItem('authToken');
+      if (!token) return;
+
+      try {
+        const response = await fetch(`${API_URL}/api/auth/me`, {
+          headers: { Authorization: `Bearer ${token}` },
+          credentials: 'include'
+        });
+
+        if (!response.ok) {
+          if (response.status === 401) {
+            localStorage.removeItem('authToken');
+            setUser(null);
+          } else if (response.status === 503) {
+            console.warn('Backend database temporarily unavailable during session restore. Preserving token.');
+          }
+          return;
+        }
+
         const data = await response.json();
         setUser(data.user);
-        setAuthToken('cookie-session');
-      } else {
-        setAuthToken(null);
-        setUser(null);
+      } catch (sessionError) {
+        console.error('Session restore failed:', sessionError);
+        // Do not immediately wipe token on network error
       }
-    } catch (error) {
-      console.error('Error fetching user profile:', error);
-    }
+    };
+
+    initAuth();
+  }, []);
+
+  // Sync favorites with localStorage
+  const handleToggleFavorite = (id) => {
+    setFavorites((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      try {
+        localStorage.setItem('appstruct_favorites', JSON.stringify([...next]));
+      } catch (e) {
+        console.error('Failed to save favorites', e);
+      }
+      return next;
+    });
   };
 
+  // Fetch saved blueprints
+  const fetchBlueprints = useCallback(async () => {
+    const accessToken = getAccessToken();
+    if (!accessToken) return;
+
+    try {
+      const response = await fetch(`${API_URL}/api/blueprints`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        credentials: 'include'
+      });
+      if (!response.ok) throw new Error('Failed to fetch blueprints');
+      const data = await response.json();
+      setSavedBlueprints(data);
+    } catch (err) {
+      console.error('Error fetching blueprints:', err);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (user) {
+      fetchBlueprints();
+    } else {
+      setSavedBlueprints([]);
+    }
+  }, [user, fetchBlueprints]);
+
+  // Auth Handlers
   const handleLogin = async (e) => {
     e.preventDefault();
     try {
       const response = await fetch(`${API_URL}/api/auth/login`, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          email: loginForm.email,
-          password: loginForm.password
-        }),
+        body: JSON.stringify({ email: loginForm.email, password: loginForm.password })
       });
-
       const data = await response.json();
+      if (!response.ok) throw new Error(data.message || 'Login failed');
 
-      if (!response.ok) {
-        throw new Error(data.message || 'Login failed');
-      }
-
-      // Session is stored in secure httpOnly cookie
-      setAuthToken('cookie-session');
-      setUser(data.user);
+      persistSession(data.token, data.user);
       setIsLoginModalOpen(false);
       setError(null);
-      showToast('Welcome back!', 'success');
-    } catch (error) {
-      setError(error.message);
-    }
-  };
-
-  const handleGoogleLogin = async (credentialResponse) => {
-    try {
-      const response = await fetch(`${API_URL}/api/auth/google`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ credential: credentialResponse.credential })
-      });
-  
-      const data = await response.json();
-  
-      if (!response.ok) {
-        throw new Error(data.message || 'Google login failed');
-      }
-  
-      setAuthToken('cookie-session');
-      setUser(data.user);
-      setIsLoginModalOpen(false);
-    } catch (error) {
-      setError(error.message);
-    }
-  };
-
-  const verifyEmail = async (token) => {
-    try {
-      const response = await fetch(`${API_URL}/api/auth/verify-email`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token })
-      });
-  
-      const data = await response.json();
-  
-      if (!response.ok) {
-        throw new Error(data.message || 'Email verification failed');
-      }
-  
-      showToast(data.message, 'success');
-      window.history.replaceState({}, document.title, window.location.pathname);
-    } catch (error) {
-      showToast(error.message, 'error');
-    }
-  };
-
-  // Forgot password
-  const handleForgotPassword = async (e) => {
-    e.preventDefault();
-    try {
-      const response = await fetch(`${API_URL}/api/auth/forgot-password`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: loginForm.email })
-      });
-      const data = await response.json();
-      setError(null);
-      setAuthSuccess(data.message || 'If an account exists, a reset link has been sent. Check your inbox.');
-    } catch (error) {
-      setError('Failed to send reset email. Please try again.');
-    }
-  };
-  
-  const handleResetPassword = async (e) => {
-    e.preventDefault();
-
-    const passwordStrong = /^(?=.*[a-zA-Z])(?=.*[0-9]).{8,}$/;
-    if (!passwordStrong.test(loginForm.password)) {
-      setError('Password must be at least 8 characters and include both letters and numbers.');
-      return;
-    }
-
-    if (loginForm.password !== loginForm.confirmPassword) {
-      setError('Passwords do not match.');
-      return;
-    }
-
-    try {
-      const response = await fetch(`${API_URL}/api/auth/reset-password`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          token: resetToken,
-          password: loginForm.password
-        })
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        setError(data.message || 'Password reset failed');
-        return;
-      }
-
-      setError(null);
-      setResetToken(null);
-      window.history.replaceState({}, document.title, window.location.pathname);
-      setAuthSuccess('Password reset successful! You can now sign in with your new password.');
-    } catch (error) {
-      setError('Password reset failed. Please try again.');
+      setLoginForm({ email: '', password: '', confirmPassword: '' });
+      showToast('Welcome back!');
+    } catch (err) {
+      setError(err.message);
     }
   };
 
@@ -227,84 +228,297 @@ function App() {
         setError('Password must be at least 8 characters and include both letters and numbers.');
         return;
       }
-
       if (loginForm.password !== loginForm.confirmPassword) {
         setError('Passwords do not match.');
         return;
       }
 
-      const username = loginForm.email.split('@')[0];
       const response = await fetch(`${API_URL}/api/auth/register`, {
         method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          username: username,
+          username: loginForm.email.split('@')[0],
           email: loginForm.email,
           password: loginForm.password
-        }),
+        })
       });
-
       const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.message || data.error || 'Registration failed');
-      }
+      if (!response.ok) throw new Error(data.message || 'Registration failed');
 
       setError(null);
-      setAuthSuccess(data.message || 'Account created! Please check your email to verify your account before signing in.');
-    } catch (error) {
-      setError(error.message);
+      setAuthSuccess(data.message || 'Account created! Please check your email to verify before signing in.');
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const handleForgotPassword = async (email) => {
+    try {
+      const response = await fetch(`${API_URL}/api/auth/forgot-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email })
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message || 'Password reset request failed');
+      setAuthSuccess(data.message || 'If an account exists, a reset link has been sent to your email.');
+      setError(null);
+    } catch (err) {
+      setError(err.message);
+    }
+  };
+
+  const handleResetPassword = async (e) => {
+    e.preventDefault();
+    if (!resetToken) {
+      setError('Password reset token is missing. Please use the link sent to your email.');
+      return;
+    }
+    try {
+      const response = await fetch(`${API_URL}/api/auth/reset-password`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: resetToken, password: loginForm.password })
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.message || 'Password reset failed');
+      setAuthSuccess('Password reset successfully. You can now sign in with your new password.');
+      setIsAuthMode('login');
+      setResetToken(null);
+    } catch (err) {
+      setError(err.message);
     }
   };
 
   const handleLogout = async () => {
     try {
-      await fetch(`${API_URL}/api/auth/logout`, {
-        method: 'POST',
-        credentials: 'include'
-      });
+      const token = getAccessToken();
+      if (token) {
+        await fetch(`${API_URL}/api/auth/logout`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${token}` },
+          credentials: 'include'
+        });
+      }
     } catch (logoutError) {
-      console.error('Logout request failed:', logoutError);
+      console.error('Logout error:', logoutError);
     }
 
-    setAuthToken(null);
+    localStorage.removeItem('authToken');
     setUser(null);
     setSavedBlueprints([]);
     setLoginForm({ email: '', password: '', confirmPassword: '' });
-    setError(null);
-    setAuthSuccess(null);
-    setIsAuthMode('login');
-    setShowPassword(false);
-    setShowConfirmPassword(false);
+    showToast('Signed out successfully');
   };
 
+  // Reset / New Blueprint
+  const handleNewBlueprint = () => {
+    setCurrentView('home');
+    if (!isGenerating) {
+      setBlueprint('');
+      setActiveBlueprintId(null);
+      setAppIdea('');
+    }
+    setError(null);
+    setChipFocusSignal((s) => s + 1);
+  };
+
+  // Open Blueprint from List
+  const handleSelectBlueprint = (bp) => {
+    setActiveBlueprintId(bp._id);
+    if (bp.isGenerating || bp._id === generatingBlueprint?._id) {
+      setBlueprint(generatingBlueprint ? generatingBlueprint.generatedMarkdown : (bp.generatedMarkdown || ''));
+      setCurrentView('blueprint');
+      setError(null);
+      return;
+    }
+    setAppIdea(bp.ideaInput || bp.title || '');
+    setPlatform(bp.platform || 'web');
+    if (bp.detailLevel) {
+      setDetailLevel(bp.detailLevel);
+    }
+    setBlueprint(bp.generatedMarkdown || '');
+    setCurrentView('blueprint');
+    setError(null);
+  };
+
+  // Blueprint CRUD Actions
+  const handleRenameBlueprint = async (id, newTitle) => {
+    const accessToken = getAccessToken();
+    if (!accessToken) {
+      setSavedBlueprints((prev) =>
+        prev.map((bp) => (bp._id === id ? { ...bp, title: newTitle, ideaInput: newTitle } : bp))
+      );
+      showToast('Blueprint renamed');
+      return;
+    }
+
+    try {
+      const response = await fetch(`${API_URL}/api/blueprints/${id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`
+        },
+        credentials: 'include',
+        body: JSON.stringify({ title: newTitle })
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.message || 'Failed to rename blueprint');
+      }
+      const updated = await response.json();
+      setSavedBlueprints((prev) =>
+        prev.map((bp) => (bp._id === id ? updated : bp))
+      );
+      showToast('Blueprint renamed');
+    } catch (err) {
+      console.error('Rename failed:', err);
+      showToast(err.message || 'Failed to rename blueprint', 'error');
+    }
+  };
+
+  const handleDuplicateBlueprint = async (bp) => {
+    const accessToken = getAccessToken();
+    const duplicateTitle = `${bp.title || bp.ideaInput} (Copy)`;
+
+    if (!accessToken) {
+      const duplicated = {
+        ...bp,
+        _id: `dup-${Date.now()}`,
+        title: duplicateTitle,
+        createdAt: new Date().toISOString()
+      };
+      setSavedBlueprints((prev) => [duplicated, ...prev]);
+      showToast('Blueprint duplicated');
+      return;
+    }
+
+    try {
+      const response = await fetch(`${API_URL}/api/blueprints`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`
+        },
+        credentials: 'include',
+        body: JSON.stringify({
+          ideaInput: bp.ideaInput,
+          title: duplicateTitle,
+          platform: bp.platform || 'web',
+          generatedMarkdown: bp.generatedMarkdown,
+          detailLevel: bp.detailLevel || 'full'
+        })
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.message || 'Failed to duplicate blueprint');
+      }
+      const savedDoc = await response.json();
+      setSavedBlueprints((prev) => [savedDoc, ...prev]);
+      showToast('Blueprint duplicated');
+    } catch (err) {
+      console.error('Duplicate failed:', err);
+      showToast(err.message || 'Failed to duplicate blueprint', 'error');
+    }
+  };
+
+  const handleDeleteBlueprint = async (id) => {
+    const accessToken = getAccessToken();
+    if (!accessToken) {
+      setSavedBlueprints((prev) => prev.filter((bp) => bp._id !== id));
+      if (activeBlueprintId === id) {
+        setBlueprint('');
+        setActiveBlueprintId(null);
+      }
+      showToast('Blueprint deleted');
+      return;
+    }
+
+    try {
+      const response = await fetch(`${API_URL}/api/blueprints/${id}`, {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${accessToken}`
+        },
+        credentials: 'include'
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.message || 'Failed to delete blueprint');
+      }
+      setSavedBlueprints((prev) => prev.filter((bp) => bp._id !== id));
+      if (activeBlueprintId === id) {
+        setBlueprint('');
+        setActiveBlueprintId(null);
+      }
+      showToast('Blueprint deleted');
+    } catch (err) {
+      console.error('Delete failed:', err);
+      showToast(err.message || 'Failed to delete blueprint', 'error');
+    }
+  };
+
+  const handleExportBlueprint = (bp) => {
+    const mdContent = bp.generatedMarkdown || '';
+    const blob = new Blob([mdContent], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `blueprint-${bp._id || 'export'}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+    showToast('Blueprint exported as Markdown');
+  };
+
+  // Generate Blueprint Flow
   const generateBlueprint = async () => {
+    if (!appIdea.trim()) {
+      setError('Please provide an application description.');
+      return;
+    }
+
+    if (!user) {
+      setIsLoginModalOpen(true);
+      return;
+    }
+
+    const accessToken = getAccessToken();
+    if (!accessToken) {
+      setError('Your session has expired. Please sign in again.');
+      setIsLoginModalOpen(true);
+      return;
+    }
+
+    const tempId = `gen-${Date.now()}`;
+    const initialTitle = appIdea.trim().slice(0, 80) || 'New Architecture Blueprint';
+    const initialGeneratingBp = {
+      _id: tempId,
+      title: initialTitle,
+      ideaInput: appIdea,
+      platform,
+      detailLevel,
+      generatedMarkdown: '',
+      createdAt: new Date().toISOString(),
+      isGenerating: true
+    };
+
     try {
       setIsGenerating(true);
       setError(null);
-      setBlueprint(''); // Clear previous blueprint
-
-      if (!user) {
-        setIsLoginModalOpen(true);
-        setIsGenerating(false);
-        return;
-      }
-
-      if (!appIdea || !platform) {
-        setError('Please provide both an app idea and platform');
-        setIsGenerating(false);
-        return;
-      }
+      setLastSubmittedPrompt(appIdea);
+      setBlueprint(''); // Clear previous output to prepare for new generation
+      setGeneratingBlueprint(initialGeneratingBp);
+      setActiveBlueprintId(tempId);
+      setCurrentView('blueprint');
 
       const response = await fetch(`${API_URL}/api/generate-stream`, {
         method: 'POST',
-        credentials: 'include',
         headers: {
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`
         },
+        credentials: 'include',
         body: JSON.stringify({
           idea: appIdea,
           platform: platform,
@@ -313,648 +527,439 @@ function App() {
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.message || 'Failed to generate blueprint');
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.message || 'Failed to generate blueprint. Please try again.');
       }
 
-      // Read the stream
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let fullMarkdown = '';
+      let streamFinishedCleanly = false;
+      let buffer = '';
+
+      const updateMarkdown = (md) => {
+        setGeneratingBlueprint((prev) => (prev ? { ...prev, generatedMarkdown: md } : null));
+        setBlueprint(md);
+      };
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // Retain incomplete chunk in buffer
 
-        const chunk = decoder.decode(value);
-        fullMarkdown += chunk;
-        setBlueprint(fullMarkdown); // Update in real-time
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (trimmed.startsWith('data: ')) {
+            const jsonStr = trimmed.slice(6);
+            try {
+              const parsed = JSON.parse(jsonStr);
+              if (parsed.type === 'chunk') {
+                fullMarkdown += parsed.text;
+                updateMarkdown(fullMarkdown);
+              } else if (parsed.type === 'done') {
+                streamFinishedCleanly = true;
+                if (parsed.fullMarkdown) {
+                  fullMarkdown = parsed.fullMarkdown;
+                }
+                updateMarkdown(fullMarkdown);
+              } else if (parsed.type === 'error') {
+                throw new Error(parsed.message || 'Stream generation failed midway.');
+              }
+            } catch (parseErr) {
+              if (parseErr.message && !parseErr.message.includes('JSON')) {
+                throw parseErr;
+              }
+              // If raw legacy chunk
+              fullMarkdown += jsonStr;
+              updateMarkdown(fullMarkdown);
+            }
+          }
+        }
       }
 
-      // Save the blueprint after generation
-      const saveResponse = await fetch(`${API_URL}/api/blueprints`, {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          ideaInput: appIdea,
-          platform: platform,
-          generatedMarkdown: fullMarkdown,
-          detailLevel: detailLevel
-        })
-      });
-
-      if (!saveResponse.ok) {
-        console.error('Failed to save blueprint:', await saveResponse.text());
+      // Check remaining buffer
+      if (buffer.trim().startsWith('data: ')) {
+        const jsonStr = buffer.trim().slice(6);
+        try {
+          const parsed = JSON.parse(jsonStr);
+          if (parsed.type === 'done') {
+            streamFinishedCleanly = true;
+            if (parsed.fullMarkdown) {
+              fullMarkdown = parsed.fullMarkdown;
+            }
+            updateMarkdown(fullMarkdown);
+          } else if (parsed.type === 'error') {
+            throw new Error(parsed.message || 'Stream generation failed midway.');
+          }
+        } catch (e) {
+          if (e.message && !e.message.includes('JSON')) throw e;
+        }
       }
 
-      // Refresh blueprints list
-      fetchBlueprints();
+      if (!streamFinishedCleanly) {
+        throw new Error('Generation terminated unexpectedly before completion. Partial blueprint retained in editor. Click retry to generate again.');
+      }
 
-    } catch (error) {
-      console.error('Error:', error);
-      setError(error.message);
+      // Auto-save blueprint to database ONLY if generation completed successfully
+      try {
+        const saveRes = await fetch(`${API_URL}/api/blueprints`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${accessToken}`
+          },
+          credentials: 'include',
+          body: JSON.stringify({
+            ideaInput: appIdea,
+            title: initialTitle,
+            platform: platform,
+            generatedMarkdown: fullMarkdown,
+            detailLevel: detailLevel
+          })
+        });
+
+        if (saveRes.ok) {
+          const savedData = await saveRes.json();
+          setSavedBlueprints((prev) => [savedData, ...prev.filter((b) => b._id !== tempId)]);
+          setActiveBlueprintId(savedData._id);
+          setGeneratingBlueprint(null);
+        }
+      } catch (saveErr) {
+        console.error('Failed to auto-save blueprint:', saveErr);
+      }
+
+    } catch (genError) {
+      console.error('Generation failed:', genError);
+      setError(genError.message || 'Something went wrong while generating the blueprint.');
+      setGeneratingBlueprint(null);
     } finally {
       setIsGenerating(false);
     }
   };
 
-  const fetchBlueprints = async () => {
-    if (!user) return;
-
-    try {
-      const response = await fetch(`${API_URL}/api/blueprints`, {
-        credentials: 'include'
-      });
-      
-      if (!response.ok) {
-        throw new Error('Failed to fetch blueprints');
-      }
-
-      const data = await response.json();
-      setSavedBlueprints(data);
-    } catch (error) {
-      console.error('Error fetching blueprints:', error);
-      setError('Failed to fetch saved blueprints');
-    }
-  };
-
-  // Fetch blueprints when user logs in
-  useEffect(() => {
-    if (user) {
-      fetchBlueprints();
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user]);
-
   return (
-    <div className="h-screen flex flex-col overflow-hidden bg-gradient-to-br from-blue-50 via-purple-50 to-pink-50">
-      {/* Toast Notification */}
+    <div className="h-screen w-screen bg-zinc-100 flex flex-col font-sans">
+      
+      {/* Toast Banner */}
       {toast && (
-        <div className={`fixed top-16 sm:top-4 right-2 sm:right-4 left-2 sm:left-auto z-50 ${
-          toast.type === 'error' ? 'bg-red-500' : 'bg-accent-600'
-        } text-white px-3 sm:px-4 py-2 sm:py-2.5 rounded-lg shadow-lg flex items-center space-x-2 max-w-sm`}>
+        <div 
+          role="status"
+          aria-live="polite"
+          className="fixed top-14 right-4 z-50 bg-zinc-900 text-white text-xs font-medium px-3.5 py-2 rounded-md shadow-lg flex items-center gap-2 animate-fade-in"
+        >
           {toast.type === 'error' ? (
-            <HiExclamationCircle className="w-4 h-4 flex-shrink-0" />
+            <HiExclamationCircle className="w-4 h-4 text-red-400" />
           ) : (
-            <HiCheckCircle className="w-4 h-4 flex-shrink-0" />
+            <HiCheckCircle className="w-4 h-4 text-zinc-300" />
           )}
-          <span className="text-xs sm:text-sm font-medium">{toast.message}</span>
+          <span>{toast.message}</span>
         </div>
       )}
 
-      {/* Minimal Navigation */}
-      <nav className="bg-white/70 backdrop-blur-sm border-b border-gray-200/50 flex-shrink-0">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6">
-          <div className="flex justify-between items-center h-14 sm:h-16">
-            <div className="flex items-center space-x-2">
-              <div className="w-7 h-7 sm:w-8 sm:h-8 bg-gradient-to-br from-blue-600 to-purple-600 rounded-lg flex items-center justify-center">
-                <HiLightningBolt className="w-4 h-4 sm:w-5 sm:h-5 text-white" />
-              </div>
-              <h1 className="text-lg sm:text-xl font-bold text-gray-900">AppStruct</h1>
-            </div>
-            <div className="flex items-center space-x-2 sm:space-x-3">
-              {user ? (
-                <>
-                  <button
-                    onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-                    className="inline-flex items-center px-2 sm:px-4 py-1.5 sm:py-2 text-xs sm:text-sm font-medium text-gray-700 hover:bg-white/50 rounded-full transition-colors"
-                  >
-                    <HiFolder className="w-4 h-4 sm:mr-2" />
-                    <span className="hidden sm:inline">Saved ({savedBlueprints.length})</span>
-                  </button>
-                  <span className="hidden md:inline text-sm text-gray-600">{user.username}</span>
-                  <button
-                    onClick={handleLogout}
-                    className="inline-flex items-center px-3 sm:px-4 py-1.5 sm:py-2 text-xs sm:text-sm font-medium text-gray-700 hover:bg-white/50 rounded-full transition-colors"
-                  >
-                    Sign Out
-                  </button>
-                </>
-              ) : (
-                <>
-                  <button
-                    onClick={() => { setIsLoginModalOpen(true); setLoginForm({ email: '', password: '', confirmPassword: '' }); setError(null); setAuthSuccess(null); setShowPassword(false); setShowConfirmPassword(false); }}
-                    className="px-3 sm:px-4 py-1.5 sm:py-2 text-xs sm:text-sm font-medium text-gray-700 hover:bg-white/50 rounded-full transition-colors"
-                  >
-                    Log In
-                  </button>
-                  <button
-                    onClick={() => {
-                      setIsAuthMode('register');
-                      setIsLoginModalOpen(true);
-                      setLoginForm({ email: '', password: '', confirmPassword: '' });
-                      setError(null);
-                      setAuthSuccess(null);
-                      setShowPassword(false);
-                      setShowConfirmPassword(false);
-                    }}
-                    className="px-3 sm:px-5 py-1.5 sm:py-2 text-xs sm:text-sm font-medium text-white bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 rounded-full transition-all shadow-md"
-                  >
-                    Get Started
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-        </div>
-      </nav>
-
-      {/* Main Content */}
-      <main className="flex-1 flex overflow-hidden">
-        {!blueprint ? (
-          /* Hero Section - Centered Input */
-          <div className="flex-1 flex items-center justify-center px-4 sm:px-6 pb-10 sm:pb-20 pt-6 sm:pt-0">
-            <div className="max-w-4xl w-full">
-              {/* Hero Heading */}
-              <div className="text-center mb-8 sm:mb-12">
-                <h1 className="text-3xl sm:text-4xl md:text-5xl lg:text-6xl font-bold text-gray-900 mb-3 sm:mb-4 leading-tight px-2">
-                  Transform <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-purple-600">your app idea</span> into technical blueprints
-                </h1>
-                <p className="text-base sm:text-lg md:text-xl text-gray-600 px-4">
-                  Describe your vision and get AI-powered architectural blueprints in seconds
-                </p>
-              </div>
-
-              {/* Error Message */}
-              {error && !isLoginModalOpen && (
-                <div className="mb-4 bg-red-50 border border-red-200 rounded-xl sm:rounded-2xl p-3 sm:p-4 flex items-center justify-between max-w-3xl mx-auto">
-                  <div className="flex items-center space-x-2">
-                    <HiExclamationCircle className="h-4 w-4 sm:h-5 sm:w-5 text-red-500 flex-shrink-0" />
-                    <span className="text-xs sm:text-sm text-red-700">{error}</span>
-                  </div>
-                  <button onClick={() => setError(null)} className="text-red-400 hover:text-red-600 flex-shrink-0">
-                    <HiX className="w-4 h-4 sm:w-5 sm:h-5" />
-                  </button>
+      {/* Main Workspace Layout */}
+      <DashboardLayout
+        headerContent={
+          <div className="flex items-center gap-2 text-xs">
+            {user ? (
+              <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1.5 px-2 py-1 rounded bg-zinc-100 text-zinc-700 font-medium">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500" />
+                  <span className="max-w-[120px] truncate">{user.email || user.username}</span>
                 </div>
-              )}
-
-              {/* Large Input Box */}
-              <div className="bg-white rounded-2xl sm:rounded-3xl shadow-xl p-4 sm:p-6 mb-4 sm:mb-6">
-                <textarea
-                  value={appIdea}
-                  onChange={(e) => {
-                    setAppIdea(e.target.value);
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  className="text-zinc-500 hover:text-zinc-900 px-2 py-1 rounded hover:bg-zinc-100 transition-colors"
+                >
+                  Sign Out
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsAuthMode('login');
+                    setIsLoginModalOpen(true);
                     setError(null);
                   }}
-                  rows={3}
-                  className="block w-full border-0 focus:ring-0 text-sm sm:text-base text-gray-700 placeholder-gray-400 resize-none"
-                  placeholder="e.g., A social media platform for pet lovers with photo sharing, profiles, and location-based features..."
-                  disabled={isGenerating}
-                />
-                
-                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mt-4 pt-4 border-t border-gray-100">
-                  <div className="flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-4">
-                    {/* Platform Pills */}
-                    <div className="flex items-center flex-wrap gap-2">
-                      {[
-                        { value: 'web', icon: HiDesktopComputer, label: 'Web' },
-                        { value: 'mobile', icon: HiDeviceMobile, label: 'Mobile' },
-                        { value: 'both', icon: HiCube, label: 'Both' }
-                      ].map((option) => (
-                        <button
-                          key={option.value}
-                          onClick={() => setPlatform(option.value)}
-                          className={`inline-flex items-center space-x-1 px-3 sm:px-4 py-2 rounded-full text-xs sm:text-sm font-medium transition-all ${
-                            platform === option.value
-                              ? 'bg-gradient-to-r from-blue-600 to-purple-600 text-white shadow-md'
-                              : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                          }`}
-                          disabled={isGenerating}
-                        >
-                          <option.icon className="w-4 h-4" />
-                          <span>{option.label}</span>
-                        </button>
-                      ))}
-                    </div>
-
-                    {/* Detail Level Pills */}
-                    <div className="flex items-center flex-wrap gap-2 sm:pl-4 sm:border-l sm:border-gray-200">
-                      {[
-                        { value: 'brief', icon: HiLightningBolt, label: 'Quick' },
-                        { value: 'full', icon: HiDocumentText, label: 'Detailed' }
-                      ].map((option) => (
-                        <button
-                          key={option.value}
-                          onClick={() => setDetailLevel(option.value)}
-                          className={`inline-flex items-center space-x-1 px-3 sm:px-4 py-2 rounded-full text-xs sm:text-sm font-medium transition-all ${
-                            detailLevel === option.value
-                              ? 'bg-purple-100 text-purple-700 border border-purple-300'
-                              : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                          }`}
-                          disabled={isGenerating}
-                        >
-                          <option.icon className="w-4 h-4" />
-                          <span>{option.label}</span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  {/* Generate Button */}
-                  <button
-                    onClick={generateBlueprint}
-                    className={`inline-flex items-center justify-center space-x-2 px-6 sm:px-8 py-3 rounded-full text-sm sm:text-base font-semibold transition-all shadow-lg ${
-                      isGenerating || !appIdea.trim()
-                        ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                        : 'bg-gradient-to-r from-blue-600 to-purple-600 text-white hover:shadow-xl hover:scale-105'
-                    }`}
-                    disabled={isGenerating || !appIdea.trim()}
-                  >
-                    {isGenerating ? (
-                      <>
-                        <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                        </svg>
-                        <span>Generating...</span>
-                      </>
-                    ) : (
-                      <>
-                        <HiLightningBolt className="w-5 h-5" />
-                        <span>Generate Blueprint</span>
-                      </>
-                    )}
-                  </button>
-                </div>
+                  className="px-2.5 py-1 font-medium text-zinc-600 hover:text-zinc-900 transition-colors"
+                >
+                  Log In
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsAuthMode('register');
+                    setIsLoginModalOpen(true);
+                    setError(null);
+                  }}
+                  className="px-3 py-1 font-medium text-white bg-zinc-900 hover:bg-zinc-800 rounded-md transition-colors shadow-2xs"
+                >
+                  Sign Up
+                </button>
               </div>
+            )}
+          </div>
+        }
+        sidebar={
+          <div className="flex flex-col h-full">
+            {/* New Blueprint Primary Action */}
+            <div className="p-3 border-b border-zinc-200/80">
+              <button
+                type="button"
+                onClick={handleNewBlueprint}
+                className="w-full flex items-center justify-center gap-1.5 px-3 py-2 bg-zinc-900 hover:bg-zinc-800 text-white rounded-md text-xs font-semibold shadow-2xs transition-all active:scale-[0.99]"
+              >
+                <HiPlus className="w-4 h-4" />
+                <span>New Blueprint</span>
+              </button>
+            </div>
 
-              {/* Quick Start Suggestions */}
-              <div className="text-center px-2">
-                <p className="text-xs sm:text-sm text-gray-600 mb-3">Quick start with these ideas:</p>
-                <div className="flex flex-wrap items-center justify-center gap-2">
-                  {[
-                    'E-commerce store',
-                    'Social media app',
-                    'Task manager',
-                    'Booking platform',
-                    'Food delivery app'
-                  ].map((suggestion) => (
-                    <button
-                      key={suggestion}
-                      onClick={() => setAppIdea(suggestion)}
-                      className="px-3 sm:px-4 py-1.5 sm:py-2 bg-white/70 hover:bg-white text-gray-700 text-xs sm:text-sm font-medium rounded-full border border-gray-200 hover:border-purple-300 transition-all"
-                      disabled={isGenerating}
-                    >
-                      {suggestion}
-                    </button>
-                  ))}
-                </div>
-                <p className="text-xs text-gray-500 mt-4 sm:mt-6">
-                  AI can make mistakes. Always double-check the results.
-                </p>
-              </div>
+            {/* Scalable Saved Blueprints List */}
+            <div className="flex-1 overflow-hidden">
+              <SavedBlueprintsList
+                blueprints={displayedBlueprints}
+                activeId={activeBlueprintId}
+                onSelect={handleSelectBlueprint}
+                onRename={handleRenameBlueprint}
+                onDuplicate={handleDuplicateBlueprint}
+                onExport={handleExportBlueprint}
+                onDelete={handleDeleteBlueprint}
+                onToggleFavorite={handleToggleFavorite}
+                favorites={favorites}
+              />
             </div>
           </div>
-        ) : (
-
-          /* Blueprint Output View */
-          <div className="flex-1 bg-white/80 backdrop-blur-sm overflow-hidden flex flex-col">
-            {/* Header with Actions */}
-            <div className="bg-white/90 backdrop-blur-sm border-b border-gray-200 px-3 sm:px-6 py-3 sm:py-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 flex-shrink-0">
-              <div className="flex items-center space-x-2 sm:space-x-3">
+        }
+        toolbar={
+          currentView === 'blueprint' ? (
+            <>
+              <div className="flex items-center gap-2 min-w-0">
                 <button
-                  onClick={() => setBlueprint('')}
-                  className="inline-flex items-center space-x-1 sm:space-x-2 px-3 sm:px-4 py-1.5 sm:py-2 text-xs sm:text-sm font-medium text-gray-700 hover:bg-gray-100 rounded-full transition-colors"
+                  type="button"
+                  onClick={() => setCurrentView('home')}
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium text-zinc-700 hover:text-zinc-950 hover:bg-zinc-100 rounded-md transition-colors flex-shrink-0"
                 >
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-                  </svg>
-                  <span className="hidden sm:inline">New Blueprint</span>
-                  <span className="sm:hidden">New</span>
+                  <HiArrowLeft className="w-3.5 h-3.5" />
+                  <span>Back to Editor</span>
                 </button>
-                <div className="h-6 w-px bg-gray-300 hidden sm:block"></div>
-                <h2 className="text-base sm:text-lg font-semibold text-gray-900">Your Blueprint</h2>
+                <div className="h-4 w-px bg-zinc-200 flex-shrink-0" />
+                <span className="text-xs font-semibold text-zinc-900 truncate">
+                  {activeTitle}
+                </span>
+                {isGenerating && activeBlueprintId === generatingBlueprint?._id && (
+                  <span 
+                    className="inline-flex items-center gap-0.5 text-zinc-500 ml-1 flex-shrink-0"
+                    aria-label="Generating blueprint"
+                  >
+                    <span className="w-1 h-1 rounded-full bg-zinc-600 animate-dot-bounce" style={{ animationDelay: '0ms' }} />
+                    <span className="w-1 h-1 rounded-full bg-zinc-600 animate-dot-bounce" style={{ animationDelay: '150ms' }} />
+                    <span className="w-1 h-1 rounded-full bg-zinc-600 animate-dot-bounce" style={{ animationDelay: '300ms' }} />
+                  </span>
+                )}
               </div>
-              
-              <div className="flex items-center space-x-2">
+
+              <div className="flex items-center gap-2 flex-shrink-0">
                 <button
+                  type="button"
+                  disabled={!blueprint}
                   onClick={() => {
+                    if (!blueprint) return;
                     navigator.clipboard.writeText(blueprint);
-                    showToast('Copied to clipboard!', 'success');
+                    showToast('Blueprint markdown copied to clipboard');
                   }}
-                  className="inline-flex items-center space-x-1 sm:space-x-2 px-3 sm:px-4 py-1.5 sm:py-2 text-xs sm:text-sm font-medium text-gray-700 hover:bg-gray-100 rounded-full transition-colors"
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                    blueprint
+                      ? 'text-zinc-700 hover:text-zinc-950 bg-zinc-100 hover:bg-zinc-200'
+                      : 'text-zinc-300 bg-zinc-50 cursor-not-allowed'
+                  }`}
                 >
-                  <HiClipboardCopy className="w-4 h-4" />
-                  <span className="hidden sm:inline">Copy</span>
+                  <HiClipboardCopy className="w-3.5 h-3.5 text-zinc-500" />
+                  <span>Copy</span>
                 </button>
+
                 <button
+                  type="button"
+                  disabled={!blueprint}
                   onClick={() => {
+                    if (!blueprint) return;
                     const blob = new Blob([blueprint], { type: 'text/markdown' });
                     const url = URL.createObjectURL(blob);
                     const a = document.createElement('a');
                     a.href = url;
-                    a.download = 'app-blueprint.md';
+                    a.download = `app-blueprint-${Date.now()}.md`;
                     a.click();
                     URL.revokeObjectURL(url);
-                    showToast('Blueprint downloaded!', 'success');
+                    showToast('Blueprint downloaded');
                   }}
-                  className="inline-flex items-center space-x-1 sm:space-x-2 px-3 sm:px-4 py-1.5 sm:py-2 text-xs sm:text-sm font-medium text-white bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 rounded-full transition-all shadow-md"
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md shadow-2xs transition-colors ${
+                    blueprint
+                      ? 'text-white bg-zinc-900 hover:bg-zinc-800'
+                      : 'text-zinc-400 bg-zinc-200 cursor-not-allowed'
+                  }`}
                 >
-                  <HiDownload className="w-4 h-4" />
-                  <span className="hidden sm:inline">Download</span>
+                  <HiDownload className="w-3.5 h-3.5" />
+                  <span>Download .md</span>
                 </button>
               </div>
-            </div>
-
-            {/* Blueprint Content */}
-            <div className="flex-1 overflow-y-auto">
-              <div className="max-w-4xl mx-auto px-4 sm:px-6 py-4 sm:py-8">
-                <div className="bg-white rounded-xl sm:rounded-2xl shadow-lg p-4 sm:p-6 md:p-8 prose prose-sm sm:prose-base md:prose-lg max-w-none">
-                  <ReactMarkdown>{blueprint}</ReactMarkdown>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-      </main>
-
-      {/* Right Sidebar - Saved Blueprints */}
-      {user && savedBlueprints.length > 0 && isSidebarOpen && (
-        <>
-          {/* Backdrop for mobile */}
-          <div 
-            className="fixed inset-0 bg-gray-900/50 backdrop-blur-sm z-30 md:hidden"
-            onClick={() => setIsSidebarOpen(false)}
-          ></div>
-          
-          <div className="fixed right-0 top-14 sm:top-16 bottom-0 w-full sm:w-96 bg-white/90 backdrop-blur-md border-l border-gray-200 shadow-2xl transition-all duration-300 z-40 overflow-hidden flex flex-col">
-            <div className="flex items-center justify-between px-4 sm:px-6 py-3 sm:py-4 border-b border-gray-200">
-              <div className="flex items-center space-x-2">
-                <HiFolder className="w-5 h-5 text-purple-600" />
-                <h3 className="text-base sm:text-lg font-semibold text-gray-900">Saved Blueprints</h3>
-                <span className="px-2 py-1 bg-purple-100 text-purple-700 text-xs font-semibold rounded-full">
-                  {savedBlueprints.length}
-                </span>
-              </div>
-              <button
-                onClick={() => setIsSidebarOpen(false)}
-                className="text-gray-400 hover:text-gray-600 p-2 hover:bg-gray-100 rounded-full transition-colors"
-              >
-                <HiX className="w-5 h-5" />
-              </button>
-            </div>
-            <div className="flex-1 overflow-y-auto p-3 sm:p-4 space-y-3">
-              {savedBlueprints.map((savedBlueprint) => (
-                <div
-                  key={savedBlueprint._id}
-                  className="bg-gradient-to-br from-white to-gray-50 rounded-xl border border-gray-200 p-3 sm:p-4 hover:border-purple-300 hover:shadow-md transition-all"
-                >
-                  <h4 className="text-sm font-semibold text-gray-900 mb-2 line-clamp-2">
-                    {savedBlueprint.ideaInput}
-                  </h4>
-                  <div className="flex items-center justify-between text-xs text-gray-500 mb-3">
-                    <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded-full font-medium">
-                      {savedBlueprint.platform}
-                    </span>
-                    <span className="hidden sm:inline">{new Date(savedBlueprint.createdAt).toLocaleDateString()}</span>
-                    <span className="sm:hidden">{new Date(savedBlueprint.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span>
-                  </div>
-                  <div className="flex items-center space-x-2">
-                    <button
-                      onClick={() => {
-                        setAppIdea(savedBlueprint.ideaInput);
-                        setPlatform(savedBlueprint.platform);
-                        setBlueprint(savedBlueprint.generatedMarkdown);
-                        setIsSidebarOpen(false);
-                        showToast('Blueprint loaded!', 'success');
-                      }}
-                      className="flex-1 text-xs sm:text-sm py-2 px-3 text-white bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 rounded-lg transition-all font-medium"
-                    >
-                      Load
-                    </button>
-                    <button
-                      onClick={() => {
-                        const blob = new Blob([savedBlueprint.generatedMarkdown], { type: 'text/markdown' });
-                        const url = URL.createObjectURL(blob);
-                        const a = document.createElement('a');
-                        a.href = url;
-                        a.download = `blueprint-${savedBlueprint._id}.md`;
-                        a.click();
-                        URL.revokeObjectURL(url);
-                        showToast('Blueprint downloaded!', 'success');
-                      }}
-                      className="p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
-                      title="Download"
-                    >
-                      <HiDownload className="h-4 w-4" />
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        </>
-      )}
-
-      {/* Login/Register Modal */}
-      {isLoginModalOpen && (
-        <div className="fixed inset-0 bg-gray-900/50 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-2xl sm:rounded-3xl p-6 sm:p-8 max-w-md w-full shadow-2xl">
-            <div className="flex justify-between items-start mb-4 sm:mb-6">
-              <div>
-                <h2 className="text-xl sm:text-2xl font-bold text-gray-900">
-                  {isAuthMode === 'login' ? 'Welcome back' : 'Get started'}
-                </h2>
-                <p className="text-xs sm:text-sm text-gray-600 mt-1">
-                  {isAuthMode === 'login' ? 'Sign in to your account' : 'Create your account'}
-                </p>
-              </div>
-              <button
-                onClick={() => {
-                  setIsLoginModalOpen(false);
-                  setError(null);
-                  setAuthSuccess(null);
-                  setShowPassword(false);
-                  setShowConfirmPassword(false);
-                  setLoginForm({ email: '', password: '', confirmPassword: '' });
-                }}
-                className="text-gray-400 hover:text-gray-600 p-2 hover:bg-gray-100 rounded-full transition-colors flex-shrink-0"
-              >
-                <HiX className="h-5 w-5" />
-              </button>
-            </div>
+            </>
+          ) : null
+        }
+        rightSidebar={
+          <ContextPanel
+            platform={platform}
+            detailLevel={detailLevel}
+            isGenerating={isGenerating}
+          />
+        }
+      >
+        {/* ================= WORKSPACE VIEW SWITCHER ================= */}
+        {currentView === 'home' ? (
+          <div className="w-full flex flex-col items-center">
             
-            {/* Tab Switcher */}
-            <div className="flex space-x-2 mb-4 sm:mb-6 p-1 bg-gray-100 rounded-xl sm:rounded-2xl">
-              <button
-                onClick={() => { setIsAuthMode('login'); setError(null); setAuthSuccess(null); setShowPassword(false); setShowConfirmPassword(false); setLoginForm(f => ({ ...f, password: '', confirmPassword: '' })); }}
-                className={`flex-1 py-2.5 sm:py-3 px-3 sm:px-4 rounded-lg sm:rounded-xl text-xs sm:text-sm font-semibold transition-all ${
-                  isAuthMode === 'login'
-                    ? 'bg-gradient-to-r from-blue-600 to-purple-600 text-white shadow-md'
-                    : 'text-gray-600 hover:text-gray-800'
-                }`}
-              >
-                Sign In
-              </button>
-              <button
-                onClick={() => { setIsAuthMode('register'); setError(null); setAuthSuccess(null); setShowPassword(false); setShowConfirmPassword(false); setLoginForm(f => ({ ...f, password: '', confirmPassword: '' })); }}
-                className={`flex-1 py-2.5 sm:py-3 px-3 sm:px-4 rounded-lg sm:rounded-xl text-xs sm:text-sm font-semibold transition-all ${
-                  isAuthMode === 'register'
-                    ? 'bg-gradient-to-r from-blue-600 to-purple-600 text-white shadow-md'
-                    : 'text-gray-600 hover:text-gray-800'
-                }`}
-              >
-                Sign Up
-              </button>
-            </div>
-
-            {authSuccess ? (
-              <div className="py-6 flex flex-col items-center text-center space-y-4">
-                <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center">
-                  <HiCheckCircle className="w-10 h-10 text-green-500" />
-                </div>
-                <h3 className="text-lg font-semibold text-gray-900">
-                  {isAuthMode === 'reset' ? 'Password Updated!' : 'Check your email'}
-                </h3>
-                <p className="text-sm text-gray-600">{authSuccess}</p>
-                <button
-                  type="button"
-                  onClick={() => { setAuthSuccess(null); setIsAuthMode('login'); setLoginForm({ email: '', password: '', confirmPassword: '' }); }}
-                  className="w-full bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white font-semibold py-2.5 px-4 rounded-xl transition-all shadow-lg text-sm"
-                >
-                  Go to Sign In
-                </button>
+            {/* COMPACT HERO SECTION (Occupies upper 20-25% of workspace) */}
+            <header className="w-full pt-2 pb-6 text-center">
+              <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full border border-zinc-200 bg-zinc-100 text-[11px] font-medium text-zinc-700 mb-2">
+                <HiSparkles className="w-3 h-3 text-zinc-500" />
+                <span>AI-powered architecture</span>
               </div>
-            ) : (
-            <>
-            {error && (
-              <div className="mb-4 bg-red-50 border border-red-200 rounded-xl p-3 flex items-center justify-between">
-                <div className="flex items-center space-x-2">
-                  <HiExclamationCircle className="h-5 w-5 text-red-500 flex-shrink-0" />
-                  <span className="text-sm text-red-700">{error}</span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setError(null)}
-                  className="text-red-400 hover:text-red-600 flex-shrink-0"
-                >
-                  <HiX className="w-4 h-4" />
-                </button>
-              </div>
-            )}
 
-            <form
-                onSubmit={
-                  isAuthMode === 'login'
-                    ? handleLogin
-                    : isAuthMode === 'register'
-                    ? handleRegister
-                    : isAuthMode === 'forgot'
-                    ? handleForgotPassword
-                    : handleResetPassword
-                }
-                className="space-y-4"
+              <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-zinc-950">
+                Architect your next idea with AI.
+              </h1>
+
+              <p className="mt-1.5 text-xs sm:text-sm text-zinc-500 max-w-lg mx-auto leading-relaxed">
+                Describe your application and receive a production-ready technical blueprint in seconds.
+              </p>
+            </header>
+
+            {/* ERROR STATE: Preserves user input and provides Retry */}
+            {error && !isLoginModalOpen && (
+              <div 
+                role="alert"
+                className="w-full mb-6 p-3.5 rounded-xl bg-red-50/90 border border-red-200 text-xs text-red-900 flex items-start justify-between gap-3 animate-fade-in"
               >
-              {isAuthMode !== 'reset' && (
-                <div>
-                  <label htmlFor="email" className="block text-xs sm:text-sm font-semibold text-gray-700 mb-2">
-                    Email address
-                  </label>
-                  <input
-                    type="email"
-                    id="email"
-                    value={loginForm.email}
-                    onChange={(e) => setLoginForm({ ...loginForm, email: e.target.value })}
-                    className="block w-full px-4 py-2.5 sm:py-3 rounded-xl border border-gray-300 focus:border-purple-500 focus:ring-2 focus:ring-purple-200 text-sm transition-all"
-                    placeholder="you@example.com"
-                    required
-                  />
-                </div>
-              )}
-              {isAuthMode !== 'forgot' && (
-                <div>
-                  <label htmlFor="password" className="block text-xs sm:text-sm font-semibold text-gray-700 mb-2">
-                    {isAuthMode === 'reset' ? 'New Password' : 'Password'}
-                  </label>
-                  <div className="relative">
-                    <input
-                      type={showPassword ? 'text' : 'password'}
-                      id="password"
-                      value={loginForm.password}
-                      onChange={(e) => setLoginForm({ ...loginForm, password: e.target.value })}
-                      className="block w-full px-4 py-2.5 sm:py-3 pr-11 rounded-xl border border-gray-300 focus:border-purple-500 focus:ring-2 focus:ring-purple-200 text-sm transition-all"
-                      placeholder="••••••••"
-                      required
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowPassword(!showPassword)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
-                    >
-                      {showPassword ? <HiEyeOff className="w-5 h-5" /> : <HiEye className="w-5 h-5" />}
-                    </button>
-                  </div>
-                  {(isAuthMode === 'reset' || isAuthMode === 'register') && (
-                    <p className="mt-1 text-xs text-gray-400">Min 8 characters, include letters and numbers</p>
-                  )}
-                </div>
-              )}
-
-              {(isAuthMode === 'reset' || isAuthMode === 'register') && (
-                <div>
-                  <label htmlFor="confirmPassword" className="block text-xs sm:text-sm font-semibold text-gray-700 mb-2">
-                    Confirm Password
-                  </label>
-                  <div className="relative">
-                    <input
-                      type={showConfirmPassword ? 'text' : 'password'}
-                      id="confirmPassword"
-                      value={loginForm.confirmPassword}
-                      onChange={(e) => setLoginForm({ ...loginForm, confirmPassword: e.target.value })}
-                      className="block w-full px-4 py-2.5 sm:py-3 pr-11 rounded-xl border border-gray-300 focus:border-purple-500 focus:ring-2 focus:ring-purple-200 text-sm transition-all"
-                      placeholder="••••••••"
-                      required
-                    />
-                    <button
-                      type="button"
-                      onClick={() => setShowConfirmPassword(!showConfirmPassword)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
-                    >
-                      {showConfirmPassword ? <HiEyeOff className="w-5 h-5" /> : <HiEye className="w-5 h-5" />}
-                    </button>
+                <div className="flex items-start gap-2.5">
+                  <HiExclamationCircle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-semibold block text-red-950">Something went wrong</span>
+                    <p className="text-red-700 mt-0.5 leading-relaxed">
+                      {error} Your application description is still here. Try again.
+                    </p>
                   </div>
                 </div>
-              )}
 
-              {isAuthMode === 'login' && (
+                <div className="flex items-center gap-2 flex-shrink-0">
                   <button
                     type="button"
-                    onClick={() => setIsAuthMode('forgot')}
-                    className="text-sm text-purple-600 hover:text-purple-700"
+                    onClick={() => {
+                      if (lastSubmittedPrompt && !appIdea) setAppIdea(lastSubmittedPrompt);
+                      generateBlueprint();
+                    }}
+                    className="inline-flex items-center gap-1 px-2.5 py-1 bg-red-600 text-white rounded font-medium hover:bg-red-700 transition-colors"
                   >
-                    Forgot password?
+                    <HiRefresh className="w-3 h-3" /> Retry
                   </button>
-                )}
+                  <button
+                    type="button"
+                    onClick={() => setError(null)}
+                    className="text-red-400 hover:text-red-700 p-1"
+                    aria-label="Dismiss error"
+                  >
+                    <HiX className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            )}
 
-              <button
-                type="submit"
-                className="w-full bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 text-white font-semibold py-2.5 sm:py-3 px-4 rounded-xl transition-all shadow-lg hover:shadow-xl text-sm"
+            {/* INPUT FORM */}
+            <IdeaInput
+              value={appIdea}
+              onChange={(v) => {
+                setAppIdea(v);
+                if (error) setError(null);
+              }}
+              platform={platform}
+              onPlatformChange={setPlatform}
+              detailLevel={detailLevel}
+              onDetailChange={setDetailLevel}
+              onGenerate={generateBlueprint}
+              isGenerating={isGenerating}
+              focusSignal={chipFocusSignal}
+            />
+
+            {/* GENERATION PROGRESS STEPPER */}
+            <GenerationStepper isGenerating={isGenerating} />
+          </div>
+        ) : (
+          
+          /* ================= TECHNICAL BLUEPRINT VIEWER ================= */
+          <div className="w-full flex flex-col animate-fade-in">
+            {/* Markdown Content Area - Scrolls smoothly under the locked toolbar */}
+            <article className="prose w-full bg-white border border-zinc-200 rounded-xl p-6 sm:p-8 shadow-xs">
+              {blueprint ? (
+                <ReactMarkdown>{blueprint}</ReactMarkdown>
+              ) : (
+                <div className="py-12 text-center text-zinc-400">
+                  <p className="text-sm font-medium text-zinc-600">Initializing blueprint architecture...</p>
+                </div>
+              )}
+            </article>
+
+            {/* Persistent Generation Status at the bottom */}
+            {isGenerating && activeBlueprintId === generatingBlueprint?._id && (
+              <div 
+                role="status" 
+                aria-live="polite"
+                className="mt-4 w-full py-3 px-4 bg-zinc-50 border border-zinc-200/90 rounded-xl flex items-center justify-between text-xs text-zinc-600 shadow-2xs animate-fade-in"
               >
-                {isAuthMode === 'login'
-                  ? 'Sign in'
-                  : isAuthMode === 'register'
-                  ? 'Create account'
-                  : isAuthMode === 'forgot'
-                  ? 'Send reset link'
-                  : 'Reset password'}
-              </button>
-            </form>
-            <div className="mt-4 flex justify-center">
-              <GoogleLogin
-                onSuccess={handleGoogleLogin}
-                onError={() => alert('Google sign-in failed')}
-              />
-            </div>
-            </>
+                <div className="flex items-center gap-2">
+                  <HiSparkles className="w-4 h-4 text-zinc-700 animate-pulse" />
+                  <span className="font-medium text-zinc-800">Generating blueprint</span>
+                  <span 
+                    className="inline-flex items-center gap-0.5 ml-0.5 text-zinc-800"
+                    aria-label="Generation in progress"
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full bg-zinc-800 animate-dot-bounce" style={{ animationDelay: '0ms' }} />
+                    <span className="w-1.5 h-1.5 rounded-full bg-zinc-800 animate-dot-bounce" style={{ animationDelay: '150ms' }} />
+                    <span className="w-1.5 h-1.5 rounded-full bg-zinc-800 animate-dot-bounce" style={{ animationDelay: '300ms' }} />
+                  </span>
+                </div>
+                <span className="text-[11px] text-zinc-400 font-mono">Real-time AI Stream</span>
+              </div>
             )}
           </div>
-        </div>
-      )}
+        )}
+      </DashboardLayout>
+
+      {/* ================= LOGIN / REGISTER MODAL ================= */}
+      <AuthModal
+        isOpen={isLoginModalOpen}
+        onClose={() => setIsLoginModalOpen(false)}
+        isAuthMode={isAuthMode}
+        setIsAuthMode={setIsAuthMode}
+        loginForm={loginForm}
+        setLoginForm={setLoginForm}
+        error={error}
+        setError={setError}
+        authSuccess={authSuccess}
+        setAuthSuccess={setAuthSuccess}
+        showPassword={showPassword}
+        setShowPassword={setShowPassword}
+        showConfirmPassword={showConfirmPassword}
+        setShowConfirmPassword={setShowConfirmPassword}
+        handleLogin={handleLogin}
+        handleRegister={handleRegister}
+        handleResetPassword={handleResetPassword}
+        handleForgotPassword={handleForgotPassword}
+        API_URL={API_URL}
+        persistSession={persistSession}
+        showToast={showToast}
+      />
+
     </div>
   );
 }
-
-export default App;

@@ -46,10 +46,10 @@ router.post('/google', async (req, res) => {
   try {
     const { credential } = req.body;
 
-    if (!credential) {
+    if (!credential || typeof credential !== 'string') {
       return res.status(400).json({
         error: true,
-        message: 'Google credential is required'
+        message: 'Valid Google credential string is required'
       });
     }
 
@@ -62,14 +62,14 @@ router.post('/google', async (req, res) => {
     const { sub, email, name, picture } = payload;
 
     let user = await User.findOne({
-      $or: [{ googleId: sub }, { email }]
+      $or: [{ googleId: String(sub) }, { email: String(email).toLowerCase() }]
     });
 
     if (!user) {
       user = new User({
-        username: email.split('@')[0],
-        email,
-        googleId: sub,
+        username: String(email).split('@')[0],
+        email: String(email).toLowerCase(),
+        googleId: String(sub),
         authProvider: 'google',
         avatar: picture,
         isEmailVerified: true
@@ -77,7 +77,7 @@ router.post('/google', async (req, res) => {
 
       await user.save();
     } else if (!user.googleId) {
-      user.googleId = sub;
+      user.googleId = String(sub);
       user.authProvider = 'google';
       user.avatar = user.avatar || picture;
       await user.save();
@@ -92,6 +92,7 @@ router.post('/google', async (req, res) => {
     res.cookie('authToken', token, authCookieOptions);
 
     res.json({
+      token,
       user: {
         id: user._id,
         username: user.username || name,
@@ -111,25 +112,35 @@ router.post('/register', async (req, res) => {
   try {
     const { username, email, password } = req.body;
 
-    // Validate input
-    if (!username || !email || !password) {
+    // Strict type validation against NoSQL injection
+    if (
+      !username || 
+      !email || 
+      !password || 
+      typeof username !== 'string' || 
+      typeof email !== 'string' || 
+      typeof password !== 'string'
+    ) {
       return res.status(400).json({
         error: true,
-        message: 'Username, email and password are required'
+        message: 'Username, email and password are required strings'
       });
     }
 
+    const sanitizedUsername = username.trim();
+    const sanitizedEmail = email.trim().toLowerCase();
+
     // Validate password strength
-  if (password.length < 8) {
-    return res.status(400).json({
-      error: true,
-      message: 'Password must be at least 8 characters long'
-    });
-  }
+    if (password.length < 8) {
+      return res.status(400).json({
+        error: true,
+        message: 'Password must be at least 8 characters long'
+      });
+    }
 
     // Validate email format
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
+    if (!emailRegex.test(sanitizedEmail)) {
       return res.status(400).json({
         error: true,
         message: 'Invalid email format'
@@ -138,10 +149,45 @@ router.post('/register', async (req, res) => {
 
     // Check if user exists
     const existingUser = await User.findOne({
-      $or: [{ email }, { username }]
+      $or: [{ email: sanitizedEmail }, { username: sanitizedUsername }]
     });
 
     if (existingUser) {
+      // If user exists but is not verified and matches this email, allow resending verification
+      if (!existingUser.isEmailVerified && existingUser.email === sanitizedEmail) {
+        const verificationToken = createToken();
+        existingUser.emailVerificationToken = hashToken(verificationToken);
+        existingUser.emailVerificationExpires = Date.now() + 24 * 60 * 60 * 1000;
+        existingUser.password = password; // Update to the new password
+        await existingUser.save();
+
+        const frontendBase = req.headers.origin || process.env.FRONTEND_URL || 'http://localhost:3001';
+        const verifyUrl = `${frontendBase}/?verifyToken=${verificationToken}`;
+
+        try {
+          await sendEmail({
+            to: sanitizedEmail,
+            subject: 'Verify your AppStruct email',
+            html: `
+              <h2>Verify your email</h2>
+              <p>Click the link below to verify your account:</p>
+              <a href="${verifyUrl}">${verifyUrl}</a>
+              <p>This link expires in 24 hours.</p>
+            `
+          });
+        } catch (emailError) {
+          console.error('Email dispatch failed during registration resend:', emailError.message);
+          return res.status(500).json({
+            error: true,
+            message: 'Could not send verification email. Please check your email configuration and try again.'
+          });
+        }
+
+        return res.status(200).json({
+          message: 'Account exists but was unverified. A new verification link has been sent to your email.'
+        });
+      }
+
       return res.status(400).json({
         error: true,
         message: 'User already exists'
@@ -152,8 +198,8 @@ router.post('/register', async (req, res) => {
     const verificationToken = createToken();
 
     const user = new User({
-      username,
-      email,
+      username: sanitizedUsername,
+      email: sanitizedEmail,
       password,
       isEmailVerified: false,
       emailVerificationToken: hashToken(verificationToken),
@@ -166,89 +212,102 @@ router.post('/register', async (req, res) => {
       console.log('User created successfully:', user._id);
     }
 
-    const verifyUrl = `${process.env.FRONTEND_URL}/?verifyToken=${verificationToken}`;
+    const frontendBase = req.headers.origin || process.env.FRONTEND_URL || 'http://localhost:3001';
+    const verifyUrl = `${frontendBase}/?verifyToken=${verificationToken}`;
 
-    await sendEmail({
-      to: email,
-      subject: 'Verify your AppStruct email',
-      html: `
-        <h2>Verify your email</h2>
-        <p>Click the link below to verify your account:</p>
-        <a href="${verifyUrl}">${verifyUrl}</a>
-        <p>This link expires in 24 hours.</p>
-      `
-    });
+    try {
+      await sendEmail({
+        to: sanitizedEmail,
+        subject: 'Verify your AppStruct email',
+        html: `
+          <h2>Verify your email</h2>
+          <p>Click the link below to verify your account:</p>
+          <a href="${verifyUrl}">${verifyUrl}</a>
+          <p>This link expires in 24 hours.</p>
+        `
+      });
+    } catch (emailError) {
+      // Rollback newly created user on email failure to prevent permanent deadlock
+      await User.deleteOne({ _id: user._id });
+      console.error('Email dispatch failed during registration, rolled back user:', emailError.message);
+      return res.status(500).json({
+        error: true,
+        message: 'Could not send verification email. Please check your email address and try again.'
+      });
+    }
 
     res.status(201).json({
       message: 'Account created. Please check your email to verify your account.'
     });
-      } catch (error) {
-        if (process.env.NODE_ENV !== 'production') {
-          console.error('Registration error:', error.message);
-        }
-    
-        res.status(500).json({
-          error: true,
-          message: 'Error creating user'
-        });
-      }
+  } catch (error) {
+    if (process.env.NODE_ENV !== 'production') {
+      console.error('Registration error:', error.message);
+    }
+
+    res.status(500).json({
+      error: true,
+      message: 'Error creating user'
     });
+  }
+});
     
-  // Verify email
-  router.post('/verify-email', async (req, res) => {
-      try {
-        const { token } = req.body;
-    
-        if (!token) {
-          return res.status(400).json({
-            error: true,
-            message: 'Verification token is required'
-          });
-        }
-    
-        const user = await User.findOne({
-          emailVerificationToken: hashToken(token),
-          emailVerificationExpires: { $gt: Date.now() }
-        });
-    
-        if (!user) {
-          return res.status(400).json({
-            error: true,
-            message: 'Invalid or expired verification token'
-          });
-        }
-    
-        user.isEmailVerified = true;
-        user.emailVerificationToken = undefined;
-        user.emailVerificationExpires = undefined;
-        await user.save();
-    
-        res.json({
-          message: 'Email verified successfully. You can now sign in.'
-        });
-      } catch (error) {
-        res.status(500).json({
-          error: true,
-          message: 'Email verification failed'
-        });
-      }
+// Verify email
+router.post('/verify-email', async (req, res) => {
+  try {
+    const { token } = req.body;
+
+    if (!token || typeof token !== 'string') {
+      return res.status(400).json({
+        error: true,
+        message: 'Verification token string is required'
+      });
+    }
+
+    const user = await User.findOne({
+      emailVerificationToken: hashToken(token.trim()),
+      emailVerificationExpires: { $gt: Date.now() }
     });
+
+    if (!user) {
+      return res.status(400).json({
+        error: true,
+        message: 'Invalid or expired verification token'
+      });
+    }
+
+    user.isEmailVerified = true;
+    user.emailVerificationToken = undefined;
+    user.emailVerificationExpires = undefined;
+    await user.save();
+
+    res.json({
+      message: 'Email verified successfully. You can now sign in.'
+    });
+  } catch (error) {
+    res.status(500).json({
+      error: true,
+      message: 'Email verification failed'
+    });
+  }
+});
 
 // Login user
 router.post('/login', async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    // Validate input
-    if (!email || !password) {
+    // Strict type validation against NoSQL query operator injection
+    if (!email || !password || typeof email !== 'string' || typeof password !== 'string') {
       return res.status(400).json({
         error: true,
-        message: 'Email and password are required'
+        message: 'Email and password must be valid strings'
       });
     }
 
-    // Find user
-    const user = await User.findOne({ email });
+    const sanitizedEmail = email.trim().toLowerCase();
+
+    // Find user by literal string
+    const user = await User.findOne({ email: sanitizedEmail });
     if (!user) {
       return res.status(401).json({
         error: true,
@@ -293,6 +352,7 @@ router.post('/login', async (req, res) => {
     }
 
     res.json({
+      token,
       user: {
         id: user._id,
         username: user.username,
@@ -310,8 +370,6 @@ router.post('/login', async (req, res) => {
   }
 });
 
-
-
 // Forgot password
 router.post('/forgot-password', async (req, res) => {
   try {
@@ -321,9 +379,15 @@ router.post('/forgot-password', async (req, res) => {
       message: 'If an account exists, a reset link has been sent.'
     };
 
-    if (!email) return res.json(genericMessage);
+    if (!email || typeof email !== 'string') {
+      return res.status(400).json({
+        error: true,
+        message: 'A valid email address string is required'
+      });
+    }
 
-    const user = await User.findOne({ email });
+    const sanitizedEmail = email.trim().toLowerCase();
+    const user = await User.findOne({ email: sanitizedEmail });
 
     if (!user || user.authProvider === 'google') {
       return res.json(genericMessage);
@@ -335,21 +399,31 @@ router.post('/forgot-password', async (req, res) => {
     user.passwordResetExpires = Date.now() + 30 * 60 * 1000;
     await user.save();
 
-    const resetUrl = `${process.env.FRONTEND_URL}/?resetToken=${resetToken}`;
+    const frontendBase = req.headers.origin || process.env.FRONTEND_URL || 'http://localhost:3001';
+    const resetUrl = `${frontendBase}/?resetToken=${resetToken}`;
 
-    await sendEmail({
-      to: email,
-      subject: 'Reset your AppStruct password',
-      html: `
-        <h2>Reset your password</h2>
-        <p>Click the link below to reset your password:</p>
-        <a href="${resetUrl}">${resetUrl}</a>
-        <p>This link expires in 30 minutes.</p>
-      `
-    });
+    try {
+      await sendEmail({
+        to: sanitizedEmail,
+        subject: 'Reset your AppStruct password',
+        html: `
+          <h2>Reset your password</h2>
+          <p>Click the link below to reset your password:</p>
+          <a href="${resetUrl}">${resetUrl}</a>
+          <p>This link expires in 30 minutes.</p>
+        `
+      });
+    } catch (sendErr) {
+      console.error('Failed to send reset email:', sendErr.message);
+      // Still return genericMessage so user enumeration is prevented
+    }
 
     if (process.env.NODE_ENV !== 'production') {
-      console.log('Password reset email sent to:', email);
+      console.log('Password reset email sent to:', sanitizedEmail);
+      return res.json({
+        ...genericMessage,
+        debugToken: resetToken
+      });
     }
 
     res.json(genericMessage);
@@ -367,10 +441,10 @@ router.post('/reset-password', async (req, res) => {
   try {
     const { token, password } = req.body;
 
-    if (!token || !password) {
+    if (!token || !password || typeof token !== 'string' || typeof password !== 'string') {
       return res.status(400).json({
         error: true,
-        message: 'Token and new password are required'
+        message: 'Token and new password must be valid strings'
       });
     }
 
@@ -382,7 +456,7 @@ router.post('/reset-password', async (req, res) => {
     }
 
     const user = await User.findOne({
-      passwordResetToken: hashToken(token),
+      passwordResetToken: hashToken(token.trim()),
       passwordResetExpires: { $gt: Date.now() }
     });
 

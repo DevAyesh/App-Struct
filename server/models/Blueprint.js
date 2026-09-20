@@ -19,6 +19,15 @@ const blueprintSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  title: {
+    type: String,
+    trim: true
+  },
+  detailLevel: {
+    type: String,
+    enum: ['brief', 'full'],
+    default: 'full'
+  },
   createdAt: {
     type: Date,
     default: Date.now
