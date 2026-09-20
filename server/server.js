@@ -94,7 +94,10 @@ app.use(cors({
   credentials: true,
   maxAge: 86400 // 24 hours
 }));
-app.use(express.json({ limit: '10kb' }));
+// Blueprints can be large markdown payloads (generation often exceeds 10kb).
+app.use(express.json({ limit: '2mb' }));
+
+const isTestEnv = (req) => process.env.NODE_ENV === 'test' || (process.env.NODE_ENV !== 'production' && req.headers['x-test-suite'] === 'true');
 
 // Rate limiting for API endpoints
 const apiLimiter = rateLimit({
@@ -103,6 +106,7 @@ const apiLimiter = rateLimit({
   message: { error: true, message: 'Too many requests from this IP, please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
+  skip: isTestEnv,
 });
 
 // Stricter rate limiting for generation endpoints
@@ -112,6 +116,7 @@ const generateLimiter = rateLimit({
   message: { error: true, message: 'Too many generation requests. Please try again in 15 minutes.' },
   standardHeaders: true,
   legacyHeaders: false,
+  skip: isTestEnv,
 });
 
 // Stricter rate limiting for authentication endpoints
@@ -121,6 +126,7 @@ const authLimiter = rateLimit({
   message: { error: true, message: 'Too many authentication attempts. Please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
+  skip: isTestEnv,
 });
 
 const verifyLimiter = rateLimit({
@@ -129,6 +135,7 @@ const verifyLimiter = rateLimit({
   message: { error: true, message: 'Too many verification attempts. Please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
+  skip: isTestEnv,
 });
 
 // Apply general rate limiting to all API routes
@@ -201,9 +208,13 @@ if (process.env.NODE_ENV !== 'production') {
   });
 }
 
-// Health check route for Render
+// Health check route for Render and monitoring
 app.get('/healthz', (req, res) => {
   res.status(200).json({ status: 'ok' });
+});
+
+app.get('/api/health', (req, res) => {
+  res.status(200).json({ status: 'healthy' });
 });
 
 // Routes
@@ -238,31 +249,30 @@ if (process.env.NODE_ENV !== 'production') {
   });
 }
 
+// User generation concurrency lock
+const activeGenerations = new Set();
+
 // Protected routes
 app.post('/api/generate', generateLimiter, auth, async (req, res) => {
+  const userIdStr = req.user._id.toString();
+
+  if (activeGenerations.has(userIdStr)) {
+    return res.status(409).json({
+      error: true,
+      message: 'A blueprint generation is already in progress for your account. Please wait for it to complete.'
+    });
+  }
+
+  activeGenerations.add(userIdStr);
+
   try {
-    if (process.env.NODE_ENV !== 'production') {
-      console.log('Generate request received:', {
-        user: req.user?._id,
-        platform: req.body.platform,
-        ideaLength: req.body.idea?.length || 0
-      });
-    }
-
-    const { idea, platform } = req.body;
+    const { idea, platform, detailLevel } = req.body;
     
-    // Input validation
-    if (!idea || !platform) {
+    // Strict input validation
+    if (!idea || !platform || typeof idea !== 'string' || typeof platform !== 'string') {
       return res.status(400).json({ 
         error: true,
-        message: 'Idea and platform are required' 
-      });
-    }
-
-    if (typeof idea !== 'string' || typeof platform !== 'string') {
-      return res.status(400).json({ 
-        error: true,
-        message: 'Invalid input types' 
+        message: 'Idea and platform must be valid strings' 
       });
     }
 
@@ -288,12 +298,14 @@ app.post('/api/generate', generateLimiter, auth, async (req, res) => {
       });
     }
 
-    const markdown = await generateBlueprint(idea, platform);
-    
-    if (process.env.NODE_ENV !== 'production') {
-      console.log('Generated markdown length:', markdown?.length || 0);
+    if (detailLevel && (typeof detailLevel !== 'string' || !['brief', 'full'].includes(detailLevel))) {
+      return res.status(400).json({
+        error: true,
+        message: 'Invalid detail level. Must be one of: brief, full'
+      });
     }
-    
+
+    const markdown = await generateBlueprint(idea, platform, detailLevel);
     res.json({ markdown });
   } catch (error) {
     if (process.env.NODE_ENV !== 'production') {
@@ -304,35 +316,39 @@ app.post('/api/generate', generateLimiter, auth, async (req, res) => {
       error: true,
       message: 'Error generating blueprint'
     });
+  } finally {
+    activeGenerations.delete(userIdStr);
   }
 });
 
-// Streaming endpoint for real-time blueprint generation
+// Streaming endpoint for real-time blueprint generation with explicit completion protocol
 app.post('/api/generate-stream', generateLimiter, auth, async (req, res) => {
-  try {
-    if (process.env.NODE_ENV !== 'production') {
-      console.log('Streaming generate request received:', {
-        user: req.user?._id,
-        platform: req.body.platform,
-        detailLevel: req.body.detailLevel,
-        ideaLength: req.body.idea?.length || 0
-      });
-    }
+  const userIdStr = req.user._id.toString();
 
+  // Server-side concurrency lock
+  if (activeGenerations.has(userIdStr)) {
+    return res.status(409).json({
+      error: true,
+      message: 'A blueprint generation is already in progress for your account. Please wait for it to complete.'
+    });
+  }
+
+  activeGenerations.add(userIdStr);
+
+  let isAborted = false;
+  req.on('close', () => {
+    isAborted = true;
+    activeGenerations.delete(userIdStr);
+  });
+
+  try {
     const { idea, platform, detailLevel } = req.body;
     
-    // Input validation
-    if (!idea || !platform) {
+    // Strict input validation
+    if (!idea || !platform || typeof idea !== 'string' || typeof platform !== 'string') {
       return res.status(400).json({ 
         error: true,
-        message: 'Idea and platform are required' 
-      });
-    }
-
-    if (typeof idea !== 'string' || typeof platform !== 'string') {
-      return res.status(400).json({ 
-        error: true,
-        message: 'Invalid input types' 
+        message: 'Idea and platform must be valid strings' 
       });
     }
 
@@ -358,25 +374,32 @@ app.post('/api/generate-stream', generateLimiter, auth, async (req, res) => {
       });
     }
 
-    if (detailLevel && !['brief', 'full'].includes(detailLevel)) {
+    if (detailLevel && (typeof detailLevel !== 'string' || !['brief', 'full'].includes(detailLevel))) {
       return res.status(400).json({ 
         error: true,
         message: 'Invalid detail level. Must be one of: brief, full' 
       });
     }
 
-    // Set headers for streaming
-    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    // Set headers for SSE stream
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Transfer-Encoding', 'chunked');
     res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
     
-    // Call the streaming version of generateBlueprint
+    // Call the streaming version of generateBlueprint with structured SSE framing
     const { generateBlueprintStream } = require('./services/deepseek');
-    await generateBlueprintStream(idea, platform, detailLevel, (chunk) => {
-      res.write(chunk);
+    const fullResult = await generateBlueprintStream(idea, platform, detailLevel, (chunk) => {
+      if (!isAborted) {
+        res.write(`data: ${JSON.stringify({ type: 'chunk', text: chunk })}\n\n`);
+      }
     });
     
-    res.end();
+    if (!isAborted) {
+      // Explicit completion protocol signal
+      res.write(`data: ${JSON.stringify({ type: 'done', fullMarkdown: fullResult })}\n\n`);
+      res.end();
+    }
   } catch (error) {
     if (process.env.NODE_ENV !== 'production') {
       console.error('Streaming Generate API Error:', error.message);
@@ -387,15 +410,19 @@ app.post('/api/generate-stream', generateLimiter, auth, async (req, res) => {
         error: true,
         message: 'Error generating blueprint'
       });
-    } else {
+    } else if (!isAborted) {
+      // Send explicit error message frame before ending stream
+      res.write(`data: ${JSON.stringify({ type: 'error', message: error.message || 'Stream generation failed midway.' })}\n\n`);
       res.end();
     }
+  } finally {
+    activeGenerations.delete(userIdStr);
   }
 });
 
 app.post('/api/blueprints', auth, async (req, res) => {
   try {
-    const { ideaInput, platform, generatedMarkdown } = req.body;
+    const { ideaInput, platform, generatedMarkdown, detailLevel, title } = req.body;
 
     if (!ideaInput || !platform || !generatedMarkdown) {
       return res.status(400).json({
@@ -404,10 +431,16 @@ app.post('/api/blueprints', auth, async (req, res) => {
       });
     }
 
-    if (typeof ideaInput !== 'string' || typeof platform !== 'string' || typeof generatedMarkdown !== 'string') {
+    if (
+      typeof ideaInput !== 'string' || 
+      typeof platform !== 'string' || 
+      typeof generatedMarkdown !== 'string' ||
+      (title && typeof title !== 'string') ||
+      (detailLevel && typeof detailLevel !== 'string')
+    ) {
       return res.status(400).json({
         error: true,
-        message: 'Invalid blueprint payload'
+        message: 'Invalid blueprint payload format'
       });
     }
 
@@ -421,6 +454,8 @@ app.post('/api/blueprints', auth, async (req, res) => {
 
     const blueprint = new Blueprint({
       ideaInput: ideaInput.trim(),
+      title: (title || ideaInput).trim().slice(0, 80),
+      detailLevel: ['brief', 'full'].includes(detailLevel) ? detailLevel : 'full',
       platform: platform.toLowerCase(),
       generatedMarkdown,
       userId: req.user._id
@@ -452,6 +487,76 @@ app.get('/api/blueprints', auth, async (req, res) => {
       message: 'Error fetching blueprints'
     });
   }
+});
+
+// Delete blueprint endpoint with ObjectId validation
+app.delete('/api/blueprints/:id', auth, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!id || typeof id !== 'string' || !mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        error: true,
+        message: 'Invalid blueprint ID format. Must be a valid 24-character hexadecimal ID.'
+      });
+    }
+
+    const blueprint = await Blueprint.findOneAndDelete({ _id: id, userId: req.user._id });
+    if (!blueprint) {
+      return res.status(404).json({ error: true, message: 'Blueprint not found' });
+    }
+    res.json({ success: true, message: 'Blueprint deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ error: true, message: 'Error deleting blueprint' });
+  }
+});
+
+// Rename blueprint endpoint with ObjectId validation
+app.put('/api/blueprints/:id', auth, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!id || typeof id !== 'string' || !mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        error: true,
+        message: 'Invalid blueprint ID format. Must be a valid 24-character hexadecimal ID.'
+      });
+    }
+
+    const { title, ideaInput } = req.body;
+
+    if ((title && typeof title !== 'string') || (ideaInput && typeof ideaInput !== 'string')) {
+      return res.status(400).json({
+        error: true,
+        message: 'Title and ideaInput must be valid strings'
+      });
+    }
+
+    const newName = (title || ideaInput || '').trim();
+    if (!newName) {
+      return res.status(400).json({ error: true, message: 'Title or ideaInput is required' });
+    }
+    const blueprint = await Blueprint.findOneAndUpdate(
+      { _id: id, userId: req.user._id },
+      { $set: { title: newName, ideaInput: newName } },
+      { new: true }
+    );
+    if (!blueprint) {
+      return res.status(404).json({ error: true, message: 'Blueprint not found' });
+    }
+    res.json(blueprint);
+  } catch (error) {
+    res.status(500).json({ error: true, message: 'Error updating blueprint' });
+  }
+});
+
+// Global process error handlers to prevent sudden server termination
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('⚠️ Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('⚠️ Uncaught Exception:', err);
 });
 
 const PORT = config.server.port;

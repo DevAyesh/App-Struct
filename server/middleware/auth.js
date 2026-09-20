@@ -11,32 +11,50 @@ const getCookieValue = (cookieHeader, key) => {
 
 const auth = async (req, res, next) => {
   try {
-    if (process.env.NODE_ENV !== 'production') {
-      console.log('Checking authentication...');
-    }
-
-    // Get token from Authorization header or httpOnly cookie
     const bearerToken = req.header('Authorization')?.replace('Bearer ', '');
     const cookieToken = getCookieValue(req.headers.cookie, 'authToken');
     const token = bearerToken || cookieToken;
-    
+
     if (!token) {
-      throw new Error('No authentication token found');
+      return res.status(401).json({
+        error: true,
+        message: 'No authentication token found'
+      });
     }
 
-    // Verify token
-    const decoded = jwt.verify(token, config.jwt.secret);
+    let decoded;
+    try {
+      decoded = jwt.verify(token, config.jwt.secret);
+    } catch (jwtError) {
+      return res.status(401).json({
+        error: true,
+        code: jwtError.name === 'TokenExpiredError' ? 'TOKEN_EXPIRED' : 'INVALID_TOKEN',
+        message: jwtError.name === 'TokenExpiredError' ? 'Token has expired' : 'Invalid authentication token'
+      });
+    }
 
-    // Find user
-    const user = await User.findOne({ _id: decoded.userId });
+    if (!decoded || !decoded.userId) {
+      return res.status(401).json({
+        error: true,
+        message: 'Invalid token payload'
+      });
+    }
+
+    let user;
+    try {
+      user = await User.findOne({ _id: decoded.userId });
+    } catch (dbError) {
+      console.error('Database error in auth middleware:', dbError.message);
+      return res.status(503).json({
+        error: true,
+        message: 'Authentication service temporarily unavailable. Please try again shortly.'
+      });
+    }
+
     if (!user) {
-      throw new Error('User not found');
-    }
-
-    if (process.env.NODE_ENV !== 'production') {
-      console.log('Authentication successful:', {
-        userId: user._id,
-        username: user.username
+      return res.status(401).json({
+        error: true,
+        message: 'User account not found'
       });
     }
 
@@ -45,13 +63,12 @@ const auth = async (req, res, next) => {
     next();
   } catch (error) {
     if (process.env.NODE_ENV !== 'production') {
-      console.error('Authentication error:', error.message);
+      console.error('Unexpected auth middleware error:', error.message);
     }
 
-    // Don't expose detailed error messages in production
-    res.status(401).json({ 
+    res.status(500).json({
       error: true,
-      message: 'Authentication failed'
+      message: 'Internal server error during authentication'
     });
   }
 };
